@@ -153,22 +153,23 @@ export const RadioChatBot = () => {
         
         // Always use Radio Browser API for working streams
         try {
-            // For Kodai FM, search specifically with multiple variations
-            let searchQuery = query;
+            let apiUrl: string;
+            
             if (isKodaiFM) {
-                // Try multiple search terms for Kodai FM
-                searchQuery = 'Kodaikanal FM';
+                // Use specific Radio Browser API search for Kodai FM
+                // Based on: https://www.radio-browser.info/search?page=1&order=clickcount&reverse=true&hidebroken=true&name=kodai
+                apiUrl = `https://de1.api.radio-browser.info/json/stations/search?name=kodai&limit=20&order=clickcount&reverse=true&hidebroken=true`;
+            } else {
+                // For other stations, use votes order
+                apiUrl = `https://de1.api.radio-browser.info/json/stations/search?name=${encodeURIComponent(query)}&limit=20&order=votes&reverse=true&hidebroken=true`;
             }
             
             // Search for the station
-            const searchResponse = await fetch(
-                `https://de1.api.radio-browser.info/json/stations/search?name=${encodeURIComponent(searchQuery)}&limit=20&order=votes&reverse=true`,
-                {
-                    headers: {
-                        'User-Agent': 'RadioChatBot/1.0',
-                    },
-                }
-            );
+            const searchResponse = await fetch(apiUrl, {
+                headers: {
+                    'User-Agent': 'RadioChatBot/1.0',
+                },
+            });
             
             if (!searchResponse.ok) {
                 throw new Error('API request failed');
@@ -177,27 +178,29 @@ export const RadioChatBot = () => {
             const stations = await searchResponse.json();
             
             if (stations && stations.length > 0) {
-                // For Kodai FM, prioritize exact matches
+                // Filter for working streams (hidebroken=true already filters, but we double-check)
                 let workingStations = stations.filter((s: any) => 
                     s.url && 
                     s.url.startsWith('http') && 
                     s.url_resolved && 
-                    s.url_resolved.startsWith('http') &&
-                    s.codec !== 'UNKNOWN'
+                    s.url_resolved.startsWith('http')
                 );
                 
                 if (isKodaiFM) {
-                    // Prioritize stations with "Kodai" in the name
-                    const kodaiStations = workingStations.filter((s: any) => 
-                        s.name && s.name.toLowerCase().includes('kodai')
-                    );
+                    // Prioritize stations with "Kodai" or "Kodaikanal" in the name
+                    const kodaiStations = workingStations.filter((s: any) => {
+                        const name = (s.name || '').toLowerCase();
+                        return name.includes('kodai') || name.includes('kodaikanal');
+                    });
                     if (kodaiStations.length > 0) {
+                        // Sort by clickcount (most popular first) since we used clickcount order
+                        kodaiStations.sort((a: any, b: any) => (b.clickcount || 0) - (a.clickcount || 0));
                         workingStations = kodaiStations;
                     }
                 }
                 
                 if (workingStations.length > 0) {
-                    // Get the most popular working station
+                    // Get the most popular working station (highest clickcount for Kodai, votes for others)
                     const station = workingStations[0];
                     // Use url_resolved which is the actual working URL
                     const streamUrl = station.url_resolved || station.url;
