@@ -77,15 +77,21 @@ const suggestedPrompts = [
 // Radio stations database - Using Radio Browser API for working streams
 // Note: We'll fetch working streams from Radio Browser API which provides CORS-enabled URLs
 // Kodai FM: https://radiosindia.com/kodaifm.html (Kodaikanal FM 100.5MHz - Tamil radio)
+// Direct stream URLs for priority stations
+// Kodai FM: https://radiosindia.com/kodaifm.html (Kodaikanal FM 100.5MHz - Tamil radio)
+// Using direct stream URL from radiosindia.com/radioindia.net network
+const directStreamUrls: Record<string, string> = {
+    // Kodai FM direct stream from radiosindia.com network
+    "kodai fm": "https://radioindia.net/radio/kodaifm/icecast.audio",
+    "kodai": "https://radioindia.net/radio/kodaifm/icecast.audio",
+    "kodaisaral fm": "https://radioindia.net/radio/kodaifm/icecast.audio",
+    "kodaisaralfm": "https://radioindia.net/radio/kodaifm/icecast.audio",
+    "kodaikanal fm": "https://radioindia.net/radio/kodaifm/icecast.audio",
+    "kodaikanal": "https://radioindia.net/radio/kodaifm/icecast.audio",
+};
+
 const radioStations: Record<string, string> = {
-    // Priority stations - Kodai FM is prioritized
-    "kodai fm": "",
-    "kodai": "",
-    "kodaisaral fm": "",
-    "kodaisaralfm": "",
-    "kodaikanal fm": "",
-    "kodaikanal": "",
-    // Other popular stations
+    // Other popular stations (will use Radio Browser API)
     "bbc radio 1": "",
     "bbc radio 2": "",
     "bbc radio 4": "",
@@ -148,21 +154,28 @@ export const RadioChatBot = () => {
     const findStation = async (query: string): Promise<{ name: string; url: string } | null> => {
         const normalizedQuery = query.toLowerCase().trim();
         
-        // Check if it's Kodai FM first (priority)
-        const isKodaiFM = normalizedQuery.includes('kodai') || normalizedQuery.includes('kodaisaral') || normalizedQuery.includes('kodaikanal');
+        // Check if it's Kodai FM first (priority) - use direct stream URL from radiosindia.com
+        if (directStreamUrls[normalizedQuery]) {
+            return {
+                name: "Kodai FM (Kodaikanal FM 100.5MHz)",
+                url: directStreamUrls[normalizedQuery],
+            };
+        }
         
-        // Always use Radio Browser API for working streams
+        // Check for partial matches for Kodai FM
+        const isKodaiFM = normalizedQuery.includes('kodai') || normalizedQuery.includes('kodaisaral') || normalizedQuery.includes('kodaikanal');
+        if (isKodaiFM) {
+            // Use direct stream URL from radiosindia.com network
+            return {
+                name: "Kodai FM (Kodaikanal FM 100.5MHz)",
+                url: "https://radioindia.net/radio/kodaifm/icecast.audio",
+            };
+        }
+        
+        // For other stations, use Radio Browser API
         try {
-            let apiUrl: string;
-            
-            if (isKodaiFM) {
-                // Use specific Radio Browser API search for Kodai FM
-                // Based on: https://www.radio-browser.info/search?page=1&order=clickcount&reverse=true&hidebroken=true&name=kodai
-                apiUrl = `https://de1.api.radio-browser.info/json/stations/search?name=kodai&limit=20&order=clickcount&reverse=true&hidebroken=true`;
-            } else {
-                // For other stations, use votes order
-                apiUrl = `https://de1.api.radio-browser.info/json/stations/search?name=${encodeURIComponent(query)}&limit=20&order=votes&reverse=true&hidebroken=true`;
-            }
+            // For other stations, use votes order
+            const apiUrl = `https://de1.api.radio-browser.info/json/stations/search?name=${encodeURIComponent(query)}&limit=20&order=votes&reverse=true&hidebroken=true`;
             
             // Search for the station
             const searchResponse = await fetch(apiUrl, {
@@ -179,34 +192,21 @@ export const RadioChatBot = () => {
             
             if (stations && stations.length > 0) {
                 // Filter for working streams (hidebroken=true already filters, but we double-check)
-                let workingStations = stations.filter((s: any) => 
+                const workingStations = stations.filter((s: any) => 
                     s.url && 
                     s.url.startsWith('http') && 
                     s.url_resolved && 
                     s.url_resolved.startsWith('http')
                 );
                 
-                if (isKodaiFM) {
-                    // Prioritize stations with "Kodai" or "Kodaikanal" in the name
-                    const kodaiStations = workingStations.filter((s: any) => {
-                        const name = (s.name || '').toLowerCase();
-                        return name.includes('kodai') || name.includes('kodaikanal');
-                    });
-                    if (kodaiStations.length > 0) {
-                        // Sort by clickcount (most popular first) since we used clickcount order
-                        kodaiStations.sort((a: any, b: any) => (b.clickcount || 0) - (a.clickcount || 0));
-                        workingStations = kodaiStations;
-                    }
-                }
-                
                 if (workingStations.length > 0) {
-                    // Get the most popular working station (highest clickcount for Kodai, votes for others)
+                    // Get the most popular working station
                     const station = workingStations[0];
                     // Use url_resolved which is the actual working URL
                     const streamUrl = station.url_resolved || station.url;
                     
                     return { 
-                        name: station.name || (isKodaiFM ? 'Kodai FM' : query), 
+                        name: station.name || query, 
                         url: streamUrl 
                     };
                 }
