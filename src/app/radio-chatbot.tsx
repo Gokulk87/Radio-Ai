@@ -2,14 +2,8 @@
 
 import { useState, useRef, useEffect } from "react";
 import {
-    Plus,
-    SearchLg,
-    Settings01,
-    User01,
     ArrowRight,
     PlayCircle,
-    Bell01,
-    BookOpen01,
     UploadCloud02,
     ChevronDown,
     Check,
@@ -77,17 +71,24 @@ const suggestedPrompts = [
 // Radio stations database - Using Radio Browser API for working streams
 // Note: We'll fetch working streams from Radio Browser API which provides CORS-enabled URLs
 // Kodai FM: https://radiosindia.com/kodaifm.html (Kodaikanal FM 100.5MHz - Tamil radio)
-// Direct stream URLs for priority stations
+// Direct stream URLs for priority stations - Multiple fallback URLs
 // Kodai FM: https://radiosindia.com/kodaifm.html (Kodaikanal FM 100.5MHz - Tamil radio)
-// Using direct stream URL from radiosindia.com/radioindia.net network
-const directStreamUrls: Record<string, string> = {
-    // Kodai FM direct stream from radiosindia.com network
-    "kodai fm": "https://radioindia.net/radio/kodaifm/icecast.audio",
-    "kodai": "https://radioindia.net/radio/kodaifm/icecast.audio",
-    "kodaisaral fm": "https://radioindia.net/radio/kodaifm/icecast.audio",
-    "kodaisaralfm": "https://radioindia.net/radio/kodaifm/icecast.audio",
-    "kodaikanal fm": "https://radioindia.net/radio/kodaifm/icecast.audio",
-    "kodaikanal": "https://radioindia.net/radio/kodaifm/icecast.audio",
+// Multiple stream URLs to try as fallbacks
+const kodaiFMStreamUrls = [
+    "https://radioindia.net/radio/kodaifm/icecast.audio",
+    "http://radioindia.net/radio/kodaifm/icecast.audio",
+    "https://streaming.radio.co/sd1a1c8b3d/listen",
+    "http://streaming.radio.co/sd1a1c8b3d/listen",
+];
+
+const directStreamUrls: Record<string, string[]> = {
+    // Kodai FM - multiple fallback URLs
+    "kodai fm": kodaiFMStreamUrls,
+    "kodai": kodaiFMStreamUrls,
+    "kodaisaral fm": kodaiFMStreamUrls,
+    "kodaisaralfm": kodaiFMStreamUrls,
+    "kodaikanal fm": kodaiFMStreamUrls,
+    "kodaikanal": kodaiFMStreamUrls,
 };
 
 const radioStations: Record<string, string> = {
@@ -151,24 +152,26 @@ export const RadioChatBot = () => {
         scrollToBottom();
     }, [messages]);
 
-    const findStation = async (query: string): Promise<{ name: string; url: string } | null> => {
+    const findStation = async (query: string): Promise<{ name: string; url: string; urls?: string[] } | null> => {
         const normalizedQuery = query.toLowerCase().trim();
         
-        // Check if it's Kodai FM first (priority) - use direct stream URL from radiosindia.com
+        // Check if it's Kodai FM first (priority) - return multiple URLs to try
         if (directStreamUrls[normalizedQuery]) {
             return {
                 name: "Kodai FM (Kodaikanal FM 100.5MHz)",
-                url: directStreamUrls[normalizedQuery],
+                url: directStreamUrls[normalizedQuery][0], // First URL as primary
+                urls: directStreamUrls[normalizedQuery], // All URLs for fallback
             };
         }
         
         // Check for partial matches for Kodai FM
         const isKodaiFM = normalizedQuery.includes('kodai') || normalizedQuery.includes('kodaisaral') || normalizedQuery.includes('kodaikanal');
         if (isKodaiFM) {
-            // Use direct stream URL from radiosindia.com network
+            // Return multiple URLs to try as fallbacks
             return {
                 name: "Kodai FM (Kodaikanal FM 100.5MHz)",
-                url: "https://radioindia.net/radio/kodaifm/icecast.audio",
+                url: kodaiFMStreamUrls[0], // First URL as primary
+                urls: kodaiFMStreamUrls, // All URLs for fallback
             };
         }
         
@@ -218,50 +221,58 @@ export const RadioChatBot = () => {
         return null;
     };
 
-    const playStation = (stationName: string, stationUrl: string) => {
+    const playStation = (stationName: string, stationUrl: string, fallbackUrls?: string[], urlIndex: number = 0) => {
         // Stop current audio if playing
         if (audioRef.current) {
             audioRef.current.pause();
             audioRef.current = null;
         }
 
+        const urlsToTry = fallbackUrls && fallbackUrls.length > 0 ? fallbackUrls : [stationUrl];
+        const currentUrl = urlsToTry[urlIndex] || stationUrl;
+
         // Show loading message
+        const loadingId = generateId();
         setMessages((prev) => [
             ...prev,
             {
-                id: generateId(),
+                id: loadingId,
                 role: "assistant",
-                content: `Connecting to ${stationName}...`,
+                content: `Connecting to ${stationName}${urlsToTry.length > 1 && urlIndex > 0 ? ` (trying alternative stream ${urlIndex + 1}/${urlsToTry.length})...` : '...'}`,
             },
         ]);
 
         // Create new audio element
-        const audio = new Audio(stationUrl);
+        const audio = new Audio(currentUrl);
         audio.volume = isMuted ? 0 : volume;
         audio.crossOrigin = "anonymous";
         audio.preload = "auto";
 
         // Set timeout to detect if stream doesn't load
         const loadTimeout = setTimeout(() => {
-            if (!isPlaying) {
-                audio.load();
+            if (!isPlaying && urlIndex < urlsToTry.length - 1) {
+                // Try next URL
+                console.log(`Stream ${urlIndex + 1} failed, trying next...`);
+                playStation(stationName, stationUrl, fallbackUrls, urlIndex + 1);
+            } else if (!isPlaying) {
+                // All URLs failed, try Radio Browser API as last resort
+                console.log("All direct URLs failed, trying Radio Browser API...");
+                tryRadioBrowserAPI(stationName);
             }
-        }, 5000);
+        }, 8000);
 
         audio.addEventListener("loadeddata", () => {
             clearTimeout(loadTimeout);
             audio.play().catch((error) => {
-                console.error("Error playing audio:", error);
-                setIsPlaying(false);
-                setCurrentStation(null);
-                setMessages((prev) => [
-                    ...prev,
-                    {
-                        id: generateId(),
-                        role: "assistant",
-                        content: `Sorry, I couldn't play ${stationName}. This might be due to:\n• CORS restrictions (browser security)\n• Geo-blocking\n• Stream temporarily unavailable\n\nTry: "BBC Radio 1" or "Classic FM" which usually work better.`,
-                    },
-                ]);
+                console.error("Error playing audio:", error, "URL:", currentUrl);
+                // Try next URL if available
+                if (urlIndex < urlsToTry.length - 1) {
+                    playStation(stationName, stationUrl, fallbackUrls, urlIndex + 1);
+                } else {
+                    setIsPlaying(false);
+                    setCurrentStation(null);
+                    tryRadioBrowserAPI(stationName);
+                }
             });
         });
 
@@ -278,7 +289,7 @@ export const RadioChatBot = () => {
                 const newMessages = [...prev];
                 const lastMessage = newMessages[newMessages.length - 1];
                 if (lastMessage && lastMessage.content.includes("Connecting")) {
-                    lastMessage.content = `Now playing ${stationName}...`;
+                    lastMessage.content = `✅ Now playing ${stationName}...`;
                 }
                 return newMessages;
             });
@@ -290,22 +301,70 @@ export const RadioChatBot = () => {
 
         audio.addEventListener("error", (e) => {
             clearTimeout(loadTimeout);
-            setIsPlaying(false);
-            setCurrentStation(null);
-            console.error("Audio error:", e, "URL:", stationUrl);
-            setMessages((prev) => [
-                ...prev,
-                {
-                    id: generateId(),
-                    role: "assistant",
-                    content: `Sorry, I couldn't play ${stationName}. The stream may be temporarily unavailable or blocked by browser security.\n\n💡 **Tip:** Try searching for a different station, or visit the station's website directly to listen. This is a demo limitation - in production, you'd use a backend proxy to handle radio streams.`,
-                },
-            ]);
+            console.error("Audio error:", e, "URL:", currentUrl, "Index:", urlIndex);
+            
+            // Try next URL if available
+            if (urlIndex < urlsToTry.length - 1) {
+                console.log(`Trying next URL (${urlIndex + 2}/${urlsToTry.length})...`);
+                playStation(stationName, stationUrl, fallbackUrls, urlIndex + 1);
+            } else {
+                // All URLs failed, try Radio Browser API
+                setIsPlaying(false);
+                setCurrentStation(null);
+                tryRadioBrowserAPI(stationName);
+            }
         });
 
         // Try to load the stream
         audio.load();
         audioRef.current = audio;
+    };
+
+    const tryRadioBrowserAPI = async (stationName: string) => {
+        try {
+            const searchResponse = await fetch(
+                `https://de1.api.radio-browser.info/json/stations/search?name=kodai&limit=10&order=clickcount&reverse=true&hidebroken=true`,
+                {
+                    headers: {
+                        'User-Agent': 'RadioChatBot/1.0',
+                    },
+                }
+            );
+            
+            if (searchResponse.ok) {
+                const stations = await searchResponse.json();
+                const workingStations = stations.filter((s: any) => 
+                    s.url && s.url.startsWith('http') && s.url_resolved && s.url_resolved.startsWith('http')
+                );
+                
+                if (workingStations.length > 0) {
+                    const station = workingStations[0];
+                    const streamUrl = station.url_resolved || station.url;
+                    setMessages((prev) => [
+                        ...prev,
+                        {
+                            id: generateId(),
+                            role: "assistant",
+                            content: `Found ${station.name} from Radio Browser. Trying to play...`,
+                        },
+                    ]);
+                    playStation(station.name || stationName, streamUrl);
+                    return;
+                }
+            }
+        } catch (error) {
+            console.error("Radio Browser API error:", error);
+        }
+        
+        // Final fallback - show message with direct link
+        setMessages((prev) => [
+            ...prev,
+            {
+                id: generateId(),
+                role: "assistant",
+                content: `Sorry, I couldn't play ${stationName} due to browser security restrictions (CORS).\n\n**Alternative options:**\n• Visit [radiosindia.com/kodaifm.html](https://radiosindia.com/kodaifm.html) to listen directly\n• Visit [kodaisaralfm.com](https://www.kodaisaralfm.com/) for the official stream\n• Try a different station like "BBC Radio 1" which usually works\n\n💡 **Note:** In production, this would use a backend proxy to bypass CORS restrictions.`,
+            },
+        ]);
     };
 
     const stopStation = () => {
@@ -365,7 +424,7 @@ export const RadioChatBot = () => {
                         : msg
                 )
             );
-            playStation(station.name, station.url);
+            playStation(station.name, station.url, station.urls);
         } else {
             // Update searching message with error
             setMessages((prev) =>
@@ -398,117 +457,56 @@ export const RadioChatBot = () => {
     };
 
     return (
-        <div className="flex h-dvh w-full bg-gray-950 dark-mode">
-            {/* Sidebar */}
-            <div className="flex w-16 flex-col items-center border-r border-gray-800 bg-gray-900 py-4">
-                {/* Logo */}
-                <div className="mb-6 flex size-10 items-center justify-center rounded-lg bg-gray-800">
-                    <div className="size-6 rounded bg-brand-600" />
-                </div>
-
-                {/* New Chat */}
-                <Button
-                    size="sm"
-                    color="secondary"
-                    className="mb-4 size-12 rounded-lg p-0"
-                    iconLeading={Plus}
-                    aria-label="New Chat"
-                />
-
-                {/* Navigation Icons */}
-                <div className="flex flex-1 flex-col gap-2">
-                    <Button
-                        size="sm"
-                        color="tertiary"
-                        className="size-12 rounded-lg p-0"
-                        iconLeading={SearchLg}
-                        aria-label="Search"
-                    />
-                                <Button
-                                    size="sm"
-                                    color="tertiary"
-                                    className="size-12 rounded-lg p-0"
-                                    iconLeading={Bell01}
-                                    aria-label="Home"
-                                />
-                                <Button
-                                    size="sm"
-                                    color="tertiary"
-                                    className="size-12 rounded-lg p-0"
-                                    iconLeading={BookOpen01}
-                                    aria-label="Files"
-                                />
-                                <Button
-                                    size="sm"
-                                    color="tertiary"
-                                    className="size-12 rounded-lg p-0"
-                                    iconLeading={SearchLg}
-                                    aria-label="History"
-                                />
-                </div>
-
-                {/* Bottom Actions */}
-                <div className="flex flex-col gap-2">
-                    <Button
-                        size="sm"
-                        color="tertiary"
-                        className="size-12 rounded-lg p-0"
-                        iconLeading={Settings01}
-                        aria-label="Settings"
-                    />
-                    <Avatar size="sm" className="size-12" />
-                </div>
-            </div>
-
-            {/* Main Content */}
+        <div className="flex h-dvh w-full flex-col bg-gray-950 dark-mode">
+            {/* Main Content - Full Width, Minimal Design */}
             <div className="flex flex-1 flex-col overflow-hidden">
-                {/* Chat Messages Area */}
-                <div className="flex-1 overflow-y-auto px-6 py-8 scrollbar-hide">
+                {/* Chat Messages Area - Centered and Minimal */}
+                <div className="flex-1 overflow-y-auto px-4 py-6 scrollbar-hide">
                     {messages.length === 0 ? (
-                        <div className="flex h-full flex-col items-center justify-center">
-                            {/* Greeting */}
-                            <div className="mb-8 text-center">
-                                <h1 className="mb-2 text-4xl font-semibold text-primary">
+                        <div className="flex h-full flex-col items-center justify-center px-4">
+                            {/* Greeting - Minimal */}
+                            <div className="mb-12 text-center">
+                                <h1 className="mb-2 text-5xl font-semibold text-primary">
                                     Hi there, <span className="bg-gradient-to-r from-brand-400 to-brand-600 bg-clip-text text-transparent">John</span>
                                 </h1>
-                                <h2 className="mb-4 text-4xl font-semibold text-primary">
+                                <h2 className="mb-6 text-5xl font-semibold text-primary">
                                     What would you like to <span className="bg-gradient-to-r from-brand-400 to-brand-600 bg-clip-text text-transparent">know?</span>
                                 </h2>
-                                <p className="text-lg text-tertiary">
-                                    Use one of the most common prompts below or use your own to begin
+                                <p className="text-base text-tertiary">
+                                    Use one of the prompts below or ask your own question
                                 </p>
                             </div>
 
-                            {/* Suggested Prompts */}
-                            <div className="grid w-full max-w-4xl grid-cols-1 gap-4 md:grid-cols-2">
+                            {/* Suggested Prompts - Minimal Grid */}
+                            <div className="grid w-full max-w-5xl grid-cols-1 gap-3 md:grid-cols-2">
                                 {suggestedPrompts.map((prompt) => {
                                     const Icon = prompt.icon;
                                     return (
                                         <button
                                             key={prompt.id}
                                             onClick={() => handlePromptClick(prompt.text)}
-                                            className="group flex flex-col items-start rounded-xl border border-gray-800 bg-gray-900 p-6 text-left transition-all hover:border-gray-700 hover:bg-gray-800"
+                                            className="group flex flex-col items-start rounded-lg border border-gray-800/50 bg-gray-900/50 p-5 text-left transition-all hover:border-gray-700/50 hover:bg-gray-800/50"
                                             suppressHydrationWarning
                                         >
-                                            <p className="mb-4 text-primary">{prompt.text}</p>
-                                            <Icon className="size-6 text-fg-quaternary group-hover:text-fg-tertiary" />
+                                            <p className="mb-3 text-sm text-primary">{prompt.text}</p>
+                                            <Icon className="size-5 text-fg-quaternary group-hover:text-fg-tertiary" />
                                         </button>
                                     );
                                 })}
                             </div>
 
-                            {/* Refresh Prompts */}
+                            {/* Refresh Prompts - Minimal */}
                             <button
                                 onClick={() => window.location.reload()}
-                                className="mt-6 flex items-center gap-2 text-sm text-tertiary hover:text-secondary"
+                                className="mt-8 flex items-center gap-2 text-xs text-tertiary hover:text-secondary"
                                 suppressHydrationWarning
                             >
-                                <ArrowRight className="size-4 rotate-90" />
+                                <ArrowRight className="size-3 rotate-90" />
                                 <span>Refresh Prompts</span>
                             </button>
                         </div>
                     ) : (
-                        <div className="mx-auto w-full max-w-3xl space-y-6">
+                        <div className="mx-auto w-full max-w-4xl space-y-4 px-4">
                             {messages.map((message) => (
                                 <div
                                     key={message.id}
@@ -563,25 +561,15 @@ export const RadioChatBot = () => {
                     )}
                 </div>
 
-                {/* Input Area - AI Prompt Style */}
-                <div className="border-t border-gray-800 bg-gray-900 px-6 py-4">
-                    <div className="mx-auto max-w-4xl">
-                        <div className="rounded-2xl bg-white/5 p-1.5 pt-4">
-                            {/* Promo Banner */}
-                            <div className="mx-2 mb-2.5 flex items-center gap-2">
-                                <div className="flex flex-1 items-center gap-2">
-                                    <PlayCircle className="size-3.5 text-brand-400" />
-                                    <h3 className="text-xs tracking-tighter text-white/90">
-                                        Radio stations are free to play!
-                                    </h3>
-                                </div>
-                                <p className="text-xs tracking-tighter text-white/90">Try Now!</p>
-                            </div>
+                {/* Input Area - Floating, Minimal Design */}
+                <div className="px-4 pb-6 pt-2" suppressHydrationWarning>
+                    <div className="mx-auto max-w-4xl" suppressHydrationWarning>
+                        <div className="rounded-2xl bg-white/5 p-1.5" suppressHydrationWarning>
 
                             {/* Input Container */}
-                            <div className="relative">
-                                <div className="relative flex flex-col">
-                                    <div className="overflow-y-auto" style={{ maxHeight: "400px" }}>
+                            <div className="relative" suppressHydrationWarning>
+                                <div className="relative flex flex-col" suppressHydrationWarning>
+                                    <div className="overflow-y-auto" style={{ maxHeight: "300px" }} suppressHydrationWarning>
                                         <TextArea
                                             textAreaRef={textareaRef}
                                             placeholder="What radio station would you like to play?"
@@ -590,22 +578,23 @@ export const RadioChatBot = () => {
                                             onKeyDown={handleKeyPress}
                                             className="w-full"
                                             textAreaClassName={cx(
-                                                "min-h-[72px] resize-none rounded-xl rounded-b-none border-none bg-white/5 px-4 py-3 text-white placeholder:text-white/70 focus-visible:ring-0 focus-visible:ring-offset-0",
-                                                "ring-1 ring-white/10"
+                                                "min-h-[60px] resize-none rounded-xl rounded-b-none border-none bg-transparent px-4 py-3 text-white placeholder:text-white/50 focus-visible:ring-0 focus-visible:ring-offset-0",
+                                                "ring-0"
                                             )}
                                         />
                                     </div>
 
-                                    {/* Bottom Bar */}
-                                    <div className="flex h-14 items-center rounded-b-xl bg-white/5">
-                                        <div className="absolute right-3 bottom-3 left-3 flex w-[calc(100%-24px)] items-center justify-between">
-                                            <div className="flex items-center gap-2">
+                                    {/* Bottom Bar - Minimal */}
+                                    <div className="flex h-12 items-center rounded-b-xl bg-transparent" suppressHydrationWarning>
+                                        <div className="absolute right-3 bottom-3 left-3 flex w-[calc(100%-24px)] items-center justify-between" suppressHydrationWarning>
+                                            <div className="flex items-center gap-2" suppressHydrationWarning>
                                                 {/* Model Selector */}
                                                 <Dropdown.Root>
                                                     <Button
                                                         size="sm"
                                                         color="tertiary"
                                                         className="flex h-8 items-center gap-1 rounded-md pr-2 pl-1 text-xs hover:bg-white/10"
+                                                        suppressHydrationWarning
                                                     >
                                                         <AnimatePresence mode="wait">
                                                             <motion.div
@@ -650,6 +639,7 @@ export const RadioChatBot = () => {
                                                 <label
                                                     aria-label="Attach file"
                                                     className="cursor-pointer rounded-lg bg-white/5 p-2 text-white/40 transition-colors hover:bg-white/10 hover:text-white"
+                                                    suppressHydrationWarning
                                                 >
                                                     <input className="hidden" type="file" />
                                                     <UploadCloud02 className="size-4" />
@@ -666,6 +656,7 @@ export const RadioChatBot = () => {
                                                     !inputValue.trim() && "opacity-30 cursor-not-allowed"
                                                 )}
                                                 type="button"
+                                                suppressHydrationWarning
                                             >
                                                 <ArrowRight
                                                     className={cx(
