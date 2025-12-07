@@ -76,12 +76,15 @@ const suggestedPrompts = [
 
 // Radio stations database - Using Radio Browser API for working streams
 // Note: We'll fetch working streams from Radio Browser API which provides CORS-enabled URLs
+// Kodai FM: https://radiosindia.com/kodaifm.html (Kodaikanal FM 100.5MHz - Tamil radio)
 const radioStations: Record<string, string> = {
     // Priority stations - Kodai FM is prioritized
     "kodai fm": "",
     "kodai": "",
     "kodaisaral fm": "",
     "kodaisaralfm": "",
+    "kodaikanal fm": "",
+    "kodaikanal": "",
     // Other popular stations
     "bbc radio 1": "",
     "bbc radio 2": "",
@@ -146,14 +149,15 @@ export const RadioChatBot = () => {
         const normalizedQuery = query.toLowerCase().trim();
         
         // Check if it's Kodai FM first (priority)
-        const isKodaiFM = normalizedQuery.includes('kodai') || normalizedQuery.includes('kodaisaral');
+        const isKodaiFM = normalizedQuery.includes('kodai') || normalizedQuery.includes('kodaisaral') || normalizedQuery.includes('kodaikanal');
         
         // Always use Radio Browser API for working streams
         try {
-            // For Kodai FM, search specifically
+            // For Kodai FM, search specifically with multiple variations
             let searchQuery = query;
             if (isKodaiFM) {
-                searchQuery = 'Kodai FM';
+                // Try multiple search terms for Kodai FM
+                searchQuery = 'Kodaikanal FM';
             }
             
             // Search for the station
